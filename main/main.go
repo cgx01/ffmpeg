@@ -1,8 +1,8 @@
 package main
 
 import (
+	"ffmpeg/util"
 	"fmt"
-	"godemo/util"
 	"log"
 	"os"
 	"os/exec"

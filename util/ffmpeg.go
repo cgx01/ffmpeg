@@ -139,9 +139,16 @@ func ConvertMKVToMP4(inputFile, outputFile, subtitle string, isSub bool) error {
 	return nil
 }
 
+var (
+	// 设置颜色函数
+	progressColor   = color.New(color.FgGreen).SprintFunc()
+	percentageColor = color.New(color.FgCyan, color.Bold).SprintfFunc()
+)
+
 func printProgress(inp, out string, sing <-chan struct{}) {
 	var lastSize int64
 	var lastPrintTime time.Time
+
 	fileInfo, err := os.Stat(inp)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -152,78 +159,51 @@ func printProgress(inp, out string, sing <-chan struct{}) {
 		return
 	}
 
-	// 获取文件大小（单位：字节）
 	fileSize := fileInfo.Size()
-	// 创建带颜色的进度条输出
-	progressColor := color.New(color.FgGreen).SprintFunc()
-	percentageColor := color.New(color.FgCyan, color.Bold).SprintfFunc()
-
-	// 使用 ticker 替代 timer，更适合周期性任务
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
-	// 初始输出
 	fmt.Printf("开始处理文件[%s]...\n", inp)
-	var barWidth, barFilled, barEmpty int
-	var percent float64
+	barWidth := 50 // 统一设置进度条宽度
+
 	for {
 		select {
 		case <-sing:
-			// 生成满进度条（100%）
-			percent = 100.0
-			barWidth = 50
-			barFilled = int(percent / 100 * float64(barWidth))
-			barEmpty = barWidth - barFilled
-
-			// 设置颜色函数
-			progressColor := color.New(color.FgGreen).SprintFunc()
-			percentageColor := color.New(color.FgCyan, color.Bold).SprintfFunc()
-
-			// 生成完整进度条
-			progressBar := fmt.Sprintf(
-				"\r%s [%s%s] %s",
-				progressColor("处理文件进度:"),
-				strings.Repeat("█", barFilled),
-				strings.Repeat(" ", barEmpty),
-				percentageColor("%.2f%%", percent),
-			)
-			fmt.Println(progressBar)
+			// 使用公共函数生成满进度条
+			fmt.Println(generateProgressBar(100.0, barWidth))
 			return
 		case <-ticker.C:
-			// 读取输出文件大小
 			info, err := os.Stat(out)
 			if err != nil {
-				// 文件可能尚未创建，或者发生其他错误
 				continue
 			}
 
 			currentSize := info.Size()
 
-			// 只有当大小变化或超过1秒未更新时才打印
 			if currentSize != lastSize || time.Since(lastPrintTime) > time.Second {
 				lastSize = currentSize
 				lastPrintTime = time.Now()
 
-				// 计算百分比
-				percent = float64(currentSize) / float64(fileSize) * 100
-
-				// 生成进度条
-				barWidth = 50
-				barFilled = int(percent / 100 * float64(barWidth))
-				barEmpty = barWidth - barFilled
-
-				progressBar := fmt.Sprintf(
-					"\r%s [%s%s] %s",
-					progressColor("处理文件进度:"),
-					strings.Repeat("█", barFilled),
-					strings.Repeat(" ", barEmpty),
-					percentageColor("%.2f%%", percent),
-				)
-
-				fmt.Print(progressBar)
+				// 计算百分比并生成进度条
+				percent := float64(currentSize) / float64(fileSize) * 100
+				fmt.Print(generateProgressBar(percent, barWidth))
 			}
 		}
 	}
+}
+
+// 生成进度条字符串
+func generateProgressBar(percent float64, barWidth int) string {
+	barFilled := int(percent / 50 * float64(barWidth))
+	barEmpty := barWidth - barFilled
+
+	return fmt.Sprintf(
+		"\r%s [%s%s] %s",
+		progressColor("处理文件进度:"),
+		strings.Repeat("█", barFilled),
+		strings.Repeat(" ", barEmpty),
+		percentageColor("%.2f%%", percent),
+	)
 }
 
 // ExtractSubtitles 从视频中提取字幕
