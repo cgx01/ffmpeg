@@ -23,7 +23,7 @@ const (
 )
 
 var (
-	ffmpegSpecialChars = regexp.MustCompile(`[][(){}?*%#&'"\t]`)
+	ffmpegSpecialChars = regexp.MustCompile(`[][(){}?*%#&'"\t, ]`)
 	sing               = make(chan struct{}, 1)
 )
 
