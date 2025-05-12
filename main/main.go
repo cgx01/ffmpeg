@@ -12,7 +12,7 @@ import (
 )
 
 var (
-	videoExtRegex = regexp.MustCompile(`(?i)\.(|mkv|avi|mov|wmv|flv|webm|mpeg|mpg|3gp|m4v)$`)
+	videoExtRegex = regexp.MustCompile(`(?i)\.(|mkv|avi|mov|wmv|flv|webm|mpeg|mpg|3gp|m4v|rmvb)$`)
 )
 
 func main() {
@@ -33,7 +33,9 @@ func main() {
 	}
 	dir := os.Args[2:]
 	for _, s := range dir {
-		processDirectory(s)
+		if err := processDirectory(s); err != nil {
+			return
+		}
 	}
 }
 
@@ -71,15 +73,24 @@ func processFile(filePath string) {
 			processDirectory(filepath.Join(filePath, dirEntry.Name()))
 			continue
 		}
-		if filepath.Ext(dirEntry.Name()) == ".mp4" || filepath.Ext(dirEntry.Name()) == ".mkv" {
-			videoPath = filepath.Join(filePath, dirEntry.Name())
+		if filepath.Ext(dirEntry.Name()) == ".mp4" || videoExtRegex.MatchString(filepath.Ext(dirEntry.Name())) {
+			if videoPath != "" {
+				newVideo := filepath.Join(filePath, dirEntry.Name())
+				readFile, _ := os.ReadFile(videoPath)
+				file, _ := os.ReadFile(newVideo)
+				if len(file) > len(readFile) {
+					videoPath = newVideo
+				}
+			} else {
+				videoPath = filepath.Join(filePath, dirEntry.Name())
+			}
 		}
 		if strings.HasSuffix(dirEntry.Name(), ".str") || strings.HasSuffix(dirEntry.Name(), ".ass") || strings.HasSuffix(dirEntry.Name(), ".srt") {
 			subtitlePath = filepath.Join(filePath, dirEntry.Name())
 		}
 	}
 	newVideoPath := util.ReplaceChar(filepath.Base(videoPath))
-	if subtitlePath != "" && filepath.Ext(videoPath) == ".mp4" {
+	if subtitlePath != "" && videoPath != "" {
 		os.Rename(videoPath, newVideoPath)
 		newSubtitlePath := util.ReplaceChar(filepath.Base(subtitlePath))
 		os.Rename(subtitlePath, newSubtitlePath)
@@ -91,18 +102,26 @@ func processFile(filePath string) {
 		} else {
 			os.Remove(newVideoPath)
 			os.Remove(newSubtitlePath)
-			os.Rename("out.mp4", videoPath)
+			if filepath.Ext(videoPath) != ".mp4" {
+				baseName := strings.TrimSuffix(videoPath, filepath.Ext(videoPath))
+				outputFile := filepath.Join(baseName + ".mp4")
+				os.Rename("out.mp4", outputFile)
+			} else {
+				os.Rename("out.mp4", videoPath)
+			}
 			os.Create(filepath.Join(filePath, "a.txt"))
 			return
 		}
-	} else if filepath.Ext(newVideoPath) != ".mp4" && videoExtRegex.MatchString(filepath.Ext(newVideoPath)) && filepath.Ext(newVideoPath) != "." {
+	} else if filepath.Ext(newVideoPath) != ".mp4" && videoExtRegex.MatchString(filepath.Ext(videoPath)) {
+		os.Rename(videoPath, newVideoPath)
 		baseName := strings.TrimSuffix(newVideoPath, filepath.Ext(newVideoPath))
-		outputFile := filepath.Join(newVideoPath, baseName+".mp4")
+		outputFile := filepath.Join(baseName + ".mp4")
 		err := util.ConvertMKVToMP4(newVideoPath, outputFile, "", false)
 		if err != nil {
-			log.Printf("【%s】转换 mp4 失败: %v\n", newVideoPath, err)
+			log.Printf("【%s】转换 mp4 失败 文件路径为: %v\n", filePath, err)
 		} else {
 			log.Printf("【%s】转换 mp4 成功\n", newVideoPath)
+			os.Rename(newVideoPath, outputFile)
 			os.Remove(newVideoPath)
 			processFile(filePath)
 		}

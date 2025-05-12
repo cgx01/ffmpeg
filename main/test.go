@@ -1,34 +1,46 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 )
 
 func main() {
 	for _, arg := range []string{
-		//"G:\\欧美新系列⭐WIFEY淫妻",
-		"G:\\",
+		"G:\\BaiduNetdiskDownload\\AngelaWhite",
 	} {
-		removeFile(arg)
+		getDir(arg)
 	}
 
 }
 
-func removeFile(path string) {
+var (
+	jpg, mp4 int
+)
+
+func getDir(path string) {
 	dir, _ := os.ReadDir(path)
-	var isRemove bool
 	for _, entry := range dir {
 		if entry.IsDir() {
-			removeFile(filepath.Join(path, entry.Name()))
+			getDir(filepath.Join(path, entry.Name()))
 		} else {
-			_, err := os.Stat(filepath.Join(path, "a.txt"))
-			if !os.IsNotExist(err) {
-				isRemove = true
-			}
-			if isRemove && filepath.Ext(entry.Name()) == ".torrent" {
+			switch filepath.Ext(entry.Name()) {
+			case ".torrent":
 				os.Remove(filepath.Join(path, entry.Name()))
+				break
+			case ".jpeg":
+				fallthrough
+			case ".gif":
+				fallthrough
+			case ".jpg":
+				fallthrough
+			case ".png":
+				jpg++
+			case ".mp4":
+				mp4++
 			}
 		}
 	}
+	fmt.Printf("JPG: %d\tMP4: %d\n", jpg, mp4)
 }

@@ -116,6 +116,7 @@ func ConvertMKVToMP4(inputFile, outputFile, subtitle string, isSub bool) error {
 	} else {
 		cmd = exec.Command(ffmpegBin, "-i", inputFile, "-c:v", "libx264", "-c:a", "aac", outputFile)
 	}
+	fmt.Printf("%v\n", cmd.Args)
 
 	// 获取命令的标准错误输出管道
 	stderr, err := cmd.StderrPipe()
@@ -135,6 +136,8 @@ func ConvertMKVToMP4(inputFile, outputFile, subtitle string, isSub bool) error {
 	if err := cmd.Wait(); err != nil {
 		return err
 	}
+	// 处理完成，显示100%进度条
+	fmt.Println(generateProgressBar(100.0, barWidth))
 	return nil
 }
 
@@ -142,13 +145,14 @@ var (
 	// 设置颜色函数
 	progressColor   = color.New(color.FgGreen).SprintFunc()
 	percentageColor = color.New(color.FgCyan, color.Bold).SprintfFunc()
+	barWidth        = 50
 )
 
 func printProgress(stderrPipe io.ReadCloser, inp string) {
 	defer stderrPipe.Close()
 	duration, _ := getTotalDuration(inp)
 	fmt.Printf("开始处理文件[%s]...\n", inp)
-	barWidth := 50
+
 	reader := bufio.NewReaderSize(stderrPipe, 1024)
 	for {
 		line, err := reader.ReadString('\r')
@@ -161,32 +165,6 @@ func printProgress(stderrPipe io.ReadCloser, inp string) {
 			fmt.Print(generateProgressBar(percent, barWidth))
 		}
 	}
-
-	// 处理完成，显示100%进度条
-	fmt.Println(generateProgressBar(100.0, barWidth))
-}
-
-// timeStrToSeconds 将"HH:MM:SS.xx"格式的时间字符串转换为秒数
-func timeStrToSeconds(timeStr string) (float64, error) {
-	parts := strings.Split(timeStr, ":")
-	if len(parts) != 3 {
-		return 0, fmt.Errorf("无效的时间格式，需要HH:MM:SS.xx格式")
-	}
-
-	hours, err := strconv.ParseFloat(parts[0], 64)
-	if err != nil {
-		return 0, err
-	}
-	minutes, err := strconv.ParseFloat(parts[1], 64)
-	if err != nil {
-		return 0, err
-	}
-	seconds, err := strconv.ParseFloat(parts[2], 64)
-	if err != nil {
-		return 0, err
-	}
-
-	return hours*3600 + minutes*60 + seconds, nil
 }
 
 // parseFFmpegOutput 解析FFmpeg输出行，提取时间信息
@@ -224,53 +202,6 @@ func getTotalDuration(inputFile string) (time.Duration, error) {
 
 	return time.Duration(duration * float64(time.Second)), nil
 }
-
-//func printProgress(inp, out string, sing <-chan struct{}) {
-//	var lastSize int64
-//	var lastPrintTime time.Time
-//
-//	fileInfo, err := os.Stat(inp)
-//	if err != nil {
-//		if os.IsNotExist(err) {
-//			fmt.Println("文件不存在")
-//		} else {
-//			fmt.Printf("获取文件信息失败: %v\n", err)
-//		}
-//		return
-//	}
-//
-//	fileSize := fileInfo.Size()
-//	ticker := time.NewTicker(500 * time.Millisecond)
-//	defer ticker.Stop()
-//
-//	fmt.Printf("开始处理文件[%s]...\n", inp)
-//	barWidth := 50 // 统一设置进度条宽度
-//
-//	for {
-//		select {
-//		case <-sing:
-//			// 使用公共函数生成满进度条
-//			fmt.Println(generateProgressBar(100.0, barWidth))
-//			return
-//		case <-ticker.C:
-//			info, err := os.Stat(out)
-//			if err != nil {
-//				continue
-//			}
-//
-//			currentSize := info.Size()
-//
-//			if currentSize != lastSize || time.Since(lastPrintTime) > time.Second {
-//				lastSize = currentSize
-//				lastPrintTime = time.Now()
-//
-//				// 计算百分比并生成进度条
-//				percent := float64(currentSize) / float64(fileSize) * 100
-//				fmt.Print(generateProgressBar(percent, barWidth))
-//			}
-//		}
-//	}
-//}
 
 // 生成进度条字符串
 func generateProgressBar(percent float64, barWidth int) string {
