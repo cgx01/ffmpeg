@@ -7,17 +7,20 @@ import (
 	"fmt"
 	"github.com/fatih/color"
 	"image/gif"
+	"io"
 	"log"
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
 
 const (
 	//ffmpegBin = "D:\\software\\ffmpeg-7.0.2-full_build-shared\\bin\\ffmpeg.exe"
-	ffmpegBin = "ffmpeg"
+	ffmpegBin  = "ffmpeg"
+	ffprobEBin = "ffprobe"
 	//GIFPARAM  = "fps=10,scale=1280:720:flags=lanczos,split[s0][s1];[s0]palettegen=stats_mode=single[p];[s1][p]paletteuse=dither=bayer:bayer_scale=3"
 	//MP4PARAM  = "fps=10,scale=1280:720:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse"
 )
@@ -56,10 +59,6 @@ func CompressGif(inputFile, outputFile, filesize string, isMP4 bool) error {
 	var stderr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr
-	defer func() {
-		sing <- struct{}{}
-	}()
-	go printProgress(inputFile, outputFile, sing)
 	// 执行命令
 	err := cmd.Run()
 	if err != nil {
@@ -118,22 +117,22 @@ func ConvertMKVToMP4(inputFile, outputFile, subtitle string, isSub bool) error {
 		cmd = exec.Command(ffmpegBin, "-i", inputFile, "-c:v", "libx264", "-c:a", "aac", outputFile)
 	}
 
-	// 创建字节缓冲区来捕获命令的标准输出和标准错误
-	var out bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &stderr
-
-	go printProgress(inputFile, outputFile, sing)
-	defer func() {
-		sing <- struct{}{}
-	}()
-	// 执行命令
-	err := cmd.Run()
-
+	// 获取命令的标准错误输出管道
+	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		// 打印标准错误输出
-		fmt.Println(fmt.Sprint(err) + ": " + stderr.String())
+		return err
+	}
+
+	// 启动命令
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	// 读取标准错误输出并解析进度
+	go printProgress(stderr, inputFile)
+
+	// 等待命令执行完成
+	if err := cmd.Wait(); err != nil {
 		return err
 	}
 	return nil
@@ -145,56 +144,140 @@ var (
 	percentageColor = color.New(color.FgCyan, color.Bold).SprintfFunc()
 )
 
-func printProgress(inp, out string, sing <-chan struct{}) {
-	var lastSize int64
-	var lastPrintTime time.Time
-
-	fileInfo, err := os.Stat(inp)
-	if err != nil {
-		if os.IsNotExist(err) {
-			fmt.Println("文件不存在")
-		} else {
-			fmt.Printf("获取文件信息失败: %v\n", err)
-		}
-		return
-	}
-
-	fileSize := fileInfo.Size()
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-
+func printProgress(stderrPipe io.ReadCloser, inp string) {
+	defer stderrPipe.Close()
+	duration, _ := getTotalDuration(inp)
 	fmt.Printf("开始处理文件[%s]...\n", inp)
-	barWidth := 50 // 统一设置进度条宽度
-
+	barWidth := 50
+	reader := bufio.NewReaderSize(stderrPipe, 1024)
 	for {
-		select {
-		case <-sing:
-			// 使用公共函数生成满进度条
-			fmt.Println(generateProgressBar(100.0, barWidth))
-			return
-		case <-ticker.C:
-			info, err := os.Stat(out)
-			if err != nil {
-				continue
-			}
-
-			currentSize := info.Size()
-
-			if currentSize != lastSize || time.Since(lastPrintTime) > time.Second {
-				lastSize = currentSize
-				lastPrintTime = time.Now()
-
-				// 计算百分比并生成进度条
-				percent := float64(currentSize) / float64(fileSize) * 100
-				fmt.Print(generateProgressBar(percent, barWidth))
-			}
+		line, err := reader.ReadString('\r')
+		if err != nil {
+			break
+		}
+		if processedTime, ok := parseFFmpegOutput(line); ok {
+			// 这里可以进一步解析时间并计算进度
+			percent := (processedTime / duration.Seconds()) * 100
+			fmt.Print(generateProgressBar(percent, barWidth))
 		}
 	}
+
+	// 处理完成，显示100%进度条
+	fmt.Println(generateProgressBar(100.0, barWidth))
 }
+
+// timeStrToSeconds 将"HH:MM:SS.xx"格式的时间字符串转换为秒数
+func timeStrToSeconds(timeStr string) (float64, error) {
+	parts := strings.Split(timeStr, ":")
+	if len(parts) != 3 {
+		return 0, fmt.Errorf("无效的时间格式，需要HH:MM:SS.xx格式")
+	}
+
+	hours, err := strconv.ParseFloat(parts[0], 64)
+	if err != nil {
+		return 0, err
+	}
+	minutes, err := strconv.ParseFloat(parts[1], 64)
+	if err != nil {
+		return 0, err
+	}
+	seconds, err := strconv.ParseFloat(parts[2], 64)
+	if err != nil {
+		return 0, err
+	}
+
+	return hours*3600 + minutes*60 + seconds, nil
+}
+
+// parseFFmpegOutput 解析FFmpeg输出行，提取时间信息
+func parseFFmpegOutput(line string) (float64, bool) {
+	re := regexp.MustCompile(`time=([0-9]{2}):([0-9]{2}):([0-9]{2}.[0-9]{2})`)
+	matches := re.FindStringSubmatch(line)
+	if len(matches) != 4 {
+		return 0, false
+	}
+
+	hours, _ := strconv.ParseFloat(matches[1], 64)
+	minutes, _ := strconv.ParseFloat(matches[2], 64)
+	seconds, _ := strconv.ParseFloat(matches[3], 64)
+
+	return hours*3600 + minutes*60 + seconds, true
+}
+
+// 获取总时长以计算精确进度
+func getTotalDuration(inputFile string) (time.Duration, error) {
+	cmd := exec.Command("ffprobe",
+		"-v", "error",
+		"-show_entries", "format=duration",
+		"-of", "default=noprint_wrappers=1:nokey=1",
+		inputFile)
+
+	output, err := cmd.Output()
+	if err != nil {
+		return 0, err
+	}
+
+	duration, err := strconv.ParseFloat(strings.TrimSpace(string(output)), 64)
+	if err != nil {
+		return 0, err
+	}
+
+	return time.Duration(duration * float64(time.Second)), nil
+}
+
+//func printProgress(inp, out string, sing <-chan struct{}) {
+//	var lastSize int64
+//	var lastPrintTime time.Time
+//
+//	fileInfo, err := os.Stat(inp)
+//	if err != nil {
+//		if os.IsNotExist(err) {
+//			fmt.Println("文件不存在")
+//		} else {
+//			fmt.Printf("获取文件信息失败: %v\n", err)
+//		}
+//		return
+//	}
+//
+//	fileSize := fileInfo.Size()
+//	ticker := time.NewTicker(500 * time.Millisecond)
+//	defer ticker.Stop()
+//
+//	fmt.Printf("开始处理文件[%s]...\n", inp)
+//	barWidth := 50 // 统一设置进度条宽度
+//
+//	for {
+//		select {
+//		case <-sing:
+//			// 使用公共函数生成满进度条
+//			fmt.Println(generateProgressBar(100.0, barWidth))
+//			return
+//		case <-ticker.C:
+//			info, err := os.Stat(out)
+//			if err != nil {
+//				continue
+//			}
+//
+//			currentSize := info.Size()
+//
+//			if currentSize != lastSize || time.Since(lastPrintTime) > time.Second {
+//				lastSize = currentSize
+//				lastPrintTime = time.Now()
+//
+//				// 计算百分比并生成进度条
+//				percent := float64(currentSize) / float64(fileSize) * 100
+//				fmt.Print(generateProgressBar(percent, barWidth))
+//			}
+//		}
+//	}
+//}
 
 // 生成进度条字符串
 func generateProgressBar(percent float64, barWidth int) string {
-	barFilled := int(percent / 50 * float64(barWidth))
+	if percent >= 100 {
+		percent = 100
+	}
+	barFilled := int(percent / 100 * float64(barWidth))
 	barEmpty := barWidth - barFilled
 
 	return fmt.Sprintf(
