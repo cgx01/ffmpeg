@@ -12,7 +12,7 @@ import (
 )
 
 var (
-	videoExtRegex = regexp.MustCompile(`(?i)\.(|mkv|avi|mov|wmv|flv|webm|mpeg|mpg|3gp|m4v|rmvb)$`)
+	videoExtRegex = regexp.MustCompile(`(?i)\.(mkv|avi|mov|mpeg|mpg|3gp|asf|divx|xvid|m2ts|ts|f4v|swf|mxf|prores|vfw|nut|ivf|m1v|m2v|mj2|mjp2|mpv2|qt|yuv|amv|drc|fli|flv|gvi|gxf|m2t|m4v|mjp|mk3d|mks|mpv|mpeg1|mpeg2|mpeg4|mts|nsv|nuv|ogm|ogv|ogx|ps|rec|rm|rmvb|roq|svi|vob|webm|wm|wmv|wtv|xesc)$`)
 )
 
 func main() {
@@ -47,9 +47,10 @@ func processDirectory(mkvPath string) error {
 	}
 	for _, entry := range dirEntries {
 		entryPath := filepath.Join(mkvPath, entry.Name())
+		fmt.Printf("entryPath:%s, dirEntries:%d\n", entryPath, len(dirEntries))
 		if entry.IsDir() {
 			processFile(entryPath)
-		} else {
+		} else if videoExtRegex.MatchString(entryPath) || filepath.Ext(entryPath) == ".mp4" || filepath.Ext(entryPath) == ".ass" || filepath.Ext(entryPath) == ".str" {
 			processFile(filepath.Dir(entryPath))
 		}
 	}
@@ -59,7 +60,8 @@ func processDirectory(mkvPath string) error {
 // processFile 处理单个文件，判断是否为 MKV 文件并进行转换
 func processFile(filePath string) {
 	_, err := os.Stat(filepath.Join(filePath, "a.txt"))
-	if !os.IsNotExist(err) {
+	if !os.IsNotExist(err) || strings.Contains(filePath, "VR") {
+		fmt.Printf("return : %s\n", filePath)
 		return
 	}
 	if strings.Contains(filePath, " ") {
@@ -90,11 +92,26 @@ func processFile(filePath string) {
 		}
 	}
 	newVideoPath := util.ReplaceChar(filepath.Base(videoPath))
+	defer func() {
+		if err != nil {
+			// 以追加模式打开文件（若文件不存在则创建，允许写入）
+			file, err := os.OpenFile("error.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if err != nil {
+				fmt.Printf("无法打开文件: %v", err)
+			}
+			defer file.Close()
+			fmt.Printf("%s\n", filePath)
+			if _, err := file.WriteString(videoPath + "\n"); err != nil {
+				fmt.Printf("写入文件失败: %v", err)
+			}
+
+		}
+	}()
 	if subtitlePath != "" && videoPath != "" {
 		os.Rename(videoPath, newVideoPath)
 		newSubtitlePath := util.ReplaceChar(filepath.Base(subtitlePath))
 		os.Rename(subtitlePath, newSubtitlePath)
-		if err := util.ConvertMKVToMP4(newVideoPath, "out.mp4", newSubtitlePath, true); err != nil {
+		if err = util.ConvertMKVToMP4(newVideoPath, "out.mp4", newSubtitlePath, true); err != nil {
 			log.Printf("合并视频【%s】字幕出错 %v", videoPath, err)
 			os.Rename(newVideoPath, videoPath)
 			os.Rename(newSubtitlePath, subtitlePath)
@@ -114,122 +131,14 @@ func processFile(filePath string) {
 		}
 	} else if filepath.Ext(newVideoPath) != ".mp4" && videoExtRegex.MatchString(filepath.Ext(videoPath)) {
 		os.Rename(videoPath, newVideoPath)
-		baseName := strings.TrimSuffix(newVideoPath, filepath.Ext(newVideoPath))
+		baseName := strings.TrimSuffix(videoPath, filepath.Ext(videoPath))
 		outputFile := filepath.Join(baseName + ".mp4")
-		err := util.ConvertMKVToMP4(newVideoPath, outputFile, "", false)
+		err = util.ConvertMKVToMP4(newVideoPath, outputFile, "", false)
 		if err != nil {
 			log.Printf("【%s】转换 mp4 失败 文件路径为: %v\n", filePath, err)
 		} else {
-			log.Printf("【%s】转换 mp4 成功\n", newVideoPath)
+			log.Printf("【%s】转换 mp4 成功\n", videoPath)
 			os.Rename(newVideoPath, outputFile)
-			os.Remove(newVideoPath)
-			processFile(filePath)
 		}
 	}
 }
-
-//// processFile 处理单个文件，判断是否为 MKV 文件并进行转换
-//func processFile(mkvPath, mp4Path, filePath string) {
-//	_, err := os.Stat(filepath.Join(mkvPath, "a.txt"))
-//	if !os.IsNotExist(err) {
-//		return
-//	}
-//	inputFile := filepath.Join(mkvPath, filePath)
-//	//if strings.Contains(inputFile, "[") || strings.Contains(inputFile, "]") {
-//	//	inputFile = strings.ReplaceAll(strings.ReplaceAll(inputFile, "[", "."), "]", "")
-//	//	os.Rename(filepath.Join(mkvPath, filePath), inputFile)
-//	//}
-//	if subtitles, _ := util.CheckVideoHasSubtitles(inputFile); subtitles {
-//		subtitle := filepath.Join(mp4Path, strings.TrimSuffix(filepath.Base(filePath), ".mp4")+".srt")
-//		//subtitle := strings.TrimSuffix(filepath.Base(filePath), ".mp4") + ".srt"
-//		if err := util.ExtractSubtitles(inputFile, subtitle); err != nil {
-//			log.Printf("提取【%s】字幕出错", inputFile)
-//			return
-//		}
-//		remoVoidSub := filepath.Join(filepath.Dir(filepath.Dir(inputFile)), filePath)
-//		//remoVoidSub := filePath
-//		if err := util.RemoveSubtitles(inputFile, remoVoidSub); err != nil {
-//			log.Printf("去除视频【%s】字幕出错", inputFile)
-//			return
-//		} else {
-//			os.Remove(inputFile)
-//			os.Rename(remoVoidSub, inputFile)
-//		}
-//		out := "out.mp4"
-//		if err := util.ConvertMKVToMP4(inputFile, out, subtitle, true); err != nil {
-//			log.Printf("合并视频【%s】字幕出错", inputFile)
-//			//os.Rename(filepath.Base(inputFile), inputFile)
-//			//os.Rename(filepath.Base(subtitle), subtitle)
-//			os.Rename(strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(filepath.Base(remoVoidSub), "[", "."), "]", ""), " ", ""), inputFile)
-//			os.Rename(strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(filepath.Base(subtitle), "[", "."), "]", ""), " ", ""), subtitle)
-//			return
-//		} else {
-//			//os.Remove(filepath.Base(remoVoidSub))
-//			//os.Remove(filepath.Base(subtitle))
-//			if filepath.Ext(filepath.Base(remoVoidSub)) == ".mkv" {
-//				remoVoidSub = filepath.Join(mkvPath, strings.TrimSuffix(filepath.Base(remoVoidSub), ".mkv")+".mp4")
-//			}
-//			os.Remove(strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(filepath.Base(remoVoidSub), "[", "."), "]", ""), " ", ""))
-//			os.Remove(strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(filepath.Base(subtitle), "[", "."), "]", ""), " ", ""))
-//			os.Rename(out, inputFile)
-//			os.Create(filepath.Join(mkvPath, "a.txt"))
-//		}
-//	} else {
-//		dir, _ := os.ReadDir(mkvPath)
-//		var videoPath, subtitlePath string
-//		var readFile int64
-//		var isFirst = true
-//		for _, dirEntry := range dir {
-//			fileInfo, _ := dirEntry.Info()
-//			if isFirst {
-//				readFile = fileInfo.Size()
-//				isFirst = false
-//				videoPath = filepath.Join(mkvPath, dirEntry.Name())
-//			}
-//			if fileInfo.Size() > readFile {
-//				readFile = fileInfo.Size()
-//				videoPath = filepath.Join(mkvPath, dirEntry.Name())
-//			}
-//			if strings.HasSuffix(dirEntry.Name(), ".str") || strings.HasSuffix(dirEntry.Name(), ".ass") || strings.HasSuffix(dirEntry.Name(), ".srt") {
-//				subtitlePath = filepath.Join(mkvPath, dirEntry.Name())
-//			}
-//		}
-//		if subtitlePath != "" {
-//			if filepath.Ext(filepath.Base(videoPath)) == ".mkv" {
-//				baseName := strings.TrimSuffix(filepath.Base(videoPath), ".mkv")
-//				outputFile := filepath.Join(mp4Path, baseName+".mp4")
-//				err := util.ConvertMKVToMP4(videoPath, outputFile, "", false)
-//				if err != nil {
-//					log.Printf("【%s】转换 mp4 失败: %v\n", inputFile, err)
-//				} else {
-//					log.Printf("【%s】转换 mp4 成功\n", inputFile)
-//					os.Remove(videoPath)
-//					os.Create(filepath.Join(mkvPath, "a.txt"))
-//					videoPath = outputFile
-//				}
-//			}
-//			if err := util.ConvertMKVToMP4(videoPath, "out.mp4", subtitlePath, true); err != nil {
-//				log.Printf("合并视频【%s】字幕出错 %v", videoPath, err)
-//				os.Rename(strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(filepath.Base(videoPath), "[", "."), "]", ""), " ", ""), videoPath)
-//				os.Rename(strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(filepath.Base(subtitlePath), "[", "."), "]", ""), " ", ""), subtitlePath)
-//				return
-//			} else {
-//				os.Remove(strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(filepath.Base(videoPath), "[", "."), "]", ""), " ", ""))
-//				os.Remove(strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(filepath.Base(subtitlePath), "[", "."), "]", ""), " ", ""))
-//				os.Rename("out.mp4", videoPath)
-//				os.Create(filepath.Join(mkvPath, "a.txt"))
-//			}
-//		} else if filepath.Ext(filePath) == ".mkv" {
-//			baseName := strings.TrimSuffix(filepath.Base(filePath), ".mkv")
-//			outputFile := filepath.Join(mp4Path, baseName+".mp4")
-//			err := util.ConvertMKVToMP4(inputFile, outputFile, "", false)
-//			if err != nil {
-//				log.Printf("【%s】转换 mp4 失败: %v\n", inputFile, err)
-//			} else {
-//				log.Printf("【%s】转换 mp4 成功\n", inputFile)
-//				os.Remove(inputFile)
-//				os.Create(filepath.Join(mkvPath, "a.txt"))
-//			}
-//		}
-//	}
-//}
