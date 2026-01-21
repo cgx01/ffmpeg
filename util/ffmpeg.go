@@ -28,6 +28,7 @@ const (
 var (
 	ffmpegSpecialChars = regexp.MustCompile(`[][(){}?*%#&'"\t, ]`)
 	sing               = make(chan struct{}, 1)
+	VideoExtRegex      = regexp.MustCompile(`(?i)\.(mkv|avi|mov|mpeg|mpg|3gp|asf|divx|xvid|m2ts|ts|f4v|swf|mxf|prores|vfw|nut|ivf|m1v|m2v|mj2|mjp2|mpv2|qt|yuv|amv|drc|fli|flv|gvi|gxf|m2t|m4v|mjp|mk3d|mks|mpv|mpeg1|mpeg2|mpeg4|mts|nsv|nuv|ogm|ogv|ogx|ps|rec|rm|rmvb|roq|svi|vob|webm|wm|wmv|wtv|xesc)$`)
 )
 
 // mp4转为gif、压缩gif

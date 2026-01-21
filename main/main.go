@@ -7,13 +7,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 )
 
-var (
-	videoExtRegex = regexp.MustCompile(`(?i)\.(mkv|avi|mov|mpeg|mpg|3gp|asf|divx|xvid|m2ts|ts|f4v|swf|mxf|prores|vfw|nut|ivf|m1v|m2v|mj2|mjp2|mpv2|qt|yuv|amv|drc|fli|flv|gvi|gxf|m2t|m4v|mjp|mk3d|mks|mpv|mpeg1|mpeg2|mpeg4|mts|nsv|nuv|ogm|ogv|ogx|ps|rec|rm|rmvb|roq|svi|vob|webm|wm|wmv|wtv|xesc)$`)
-)
+var ()
 
 func main() {
 	if len(os.Args) < 3 {
@@ -50,9 +47,10 @@ func processDirectory(mkvPath string) error {
 		fmt.Printf("entryPath:%s, dirEntries:%d\n", entryPath, len(dirEntries))
 		if entry.IsDir() {
 			processFile(entryPath)
-		} else if videoExtRegex.MatchString(entryPath) || filepath.Ext(entryPath) == ".mp4" || filepath.Ext(entryPath) == ".ass" || filepath.Ext(entryPath) == ".str" {
-			processFile(filepath.Dir(entryPath))
 		}
+		//else if videoExtRegex.MatchString(entryPath) || filepath.Ext(entryPath) == ".mp4" || filepath.Ext(entryPath) == ".ass" || filepath.Ext(entryPath) == ".str" {
+		//	processFile(filepath.Dir(entryPath))
+		//}
 	}
 	return nil
 }
@@ -72,10 +70,11 @@ func processFile(filePath string) {
 	var videoPath, subtitlePath string
 	for _, dirEntry := range dir {
 		if dirEntry.IsDir() {
-			processDirectory(filepath.Join(filePath, dirEntry.Name()))
-			continue
+			fmt.Printf("path : %s\n", filepath.Join(filePath, dirEntry.Name()))
+			processFile(filepath.Join(filePath, dirEntry.Name()))
+			//continue
 		}
-		if filepath.Ext(dirEntry.Name()) == ".mp4" || videoExtRegex.MatchString(filepath.Ext(dirEntry.Name())) {
+		if filepath.Ext(dirEntry.Name()) == ".mp4" || util.VideoExtRegex.MatchString(filepath.Ext(dirEntry.Name())) {
 			if videoPath != "" {
 				newVideo := filepath.Join(filePath, dirEntry.Name())
 				readFile, _ := os.ReadFile(videoPath)
@@ -129,7 +128,7 @@ func processFile(filePath string) {
 			os.Create(filepath.Join(filePath, "a.txt"))
 			return
 		}
-	} else if filepath.Ext(newVideoPath) != ".mp4" && videoExtRegex.MatchString(filepath.Ext(videoPath)) {
+	} else if filepath.Ext(newVideoPath) != ".mp4" && util.VideoExtRegex.MatchString(filepath.Ext(videoPath)) {
 		os.Rename(videoPath, newVideoPath)
 		baseName := strings.TrimSuffix(videoPath, filepath.Ext(videoPath))
 		outputFile := filepath.Join(baseName + ".mp4")
