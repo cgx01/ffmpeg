@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -18,16 +19,12 @@ import (
 )
 
 const (
-	//ffmpegBin = "D:\\software\\ffmpeg-7.0.2-full_build-shared\\bin\\ffmpeg.exe"
 	ffmpegBin  = "ffmpeg"
 	ffprobEBin = "ffprobe"
-	//GIFPARAM  = "fps=10,scale=1280:720:flags=lanczos,split[s0][s1];[s0]palettegen=stats_mode=single[p];[s1][p]paletteuse=dither=bayer:bayer_scale=3"
-	//MP4PARAM  = "fps=10,scale=1280:720:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse"
 )
 
 var (
 	ffmpegSpecialChars = regexp.MustCompile(`[][(){}?*%#&'"\t, ]`)
-	sing               = make(chan struct{}, 1)
 	VideoExtRegex      = regexp.MustCompile(`(?i)\.(mkv|avi|mov|mpeg|mpg|3gp|asf|divx|xvid|m2ts|ts|f4v|swf|mxf|prores|vfw|nut|ivf|m1v|m2v|mj2|mjp2|mpv2|qt|yuv|amv|drc|fli|flv|gvi|gxf|m2t|m4v|mjp|mk3d|mks|mpv|mpeg1|mpeg2|mpeg4|mts|nsv|nuv|ogm|ogv|ogx|ps|rec|rm|rmvb|roq|svi|vob|webm|wm|wmv|wtv|xesc)$`)
 )
 
@@ -37,7 +34,6 @@ func CompressGif(inputFile, outputFile, filesize string, isMP4 bool) error {
 	if isMP4 {
 		width, height := getMP4Stream(inputFile)
 		MP4PARAM := fmt.Sprintf("fps=10,scale=%d:%d:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse", width, height)
-		//ffmpeg -i Join_file_082107340.mp4 -vf "fps=10,scale=1280:720:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse" -fs 9M Join_file_082107340.gif
 		cmd = exec.Command(ffmpegBin, "-i", inputFile, "-vf", fmt.Sprintf("%s", MP4PARAM), "-fs", filesize, outputFile)
 	} else {
 		open, err := os.Open(inputFile)
@@ -50,7 +46,6 @@ func CompressGif(inputFile, outputFile, filesize string, isMP4 bool) error {
 			return fmt.Errorf("无法解码图像: %v filename is %s\n", err, inputFile)
 		}
 		GIFPARAM := fmt.Sprintf("fps=10,scale=%d:%d:flags=lanczos,split[s0][s1];[s0]palettegen=stats_mode=single[p];[s1][p]paletteuse=dither=bayer:bayer_scale=3", img.Width, img.Height)
-		//ffmpeg -i 51967511.gif -vf  -fs 9M -max_muxing_queue_size 9999 o.gif
 		cmd = exec.Command(ffmpegBin, "-i", inputFile, "-vf", fmt.Sprintf("%s", GIFPARAM), "-fs", filesize, "-max_muxing_queue_size", "9999", outputFile)
 	}
 	fmt.Printf("执行命令: %v\n", cmd.Args)
@@ -108,15 +103,48 @@ func getMP4Stream(inputFile string) (width, height int) {
 	return result.Streams[0].Width, result.Streams[0].Height
 }
 
-// ConvertMKVToMP4 函数用于将 MKV 文件转换为 MP4 文件
-func ConvertMKVToMP4(inputFile, outputFile, subtitle string, isSub bool) error {
+// ConvertVideo 函数用于通用的视频格式转换
+func ConvertVideo(inputFile, outputFile, subtitle string, isSub bool) error {
 	// 构建 ffmpeg 命令
-	var cmd *exec.Cmd
+	var args []string
+	args = append(args, "-i", inputFile)
+
 	if isSub && subtitle != "" {
-		cmd = exec.Command(ffmpegBin, "-i", inputFile, "-vf", fmt.Sprintf("subtitles=%s", subtitle), outputFile)
+		// 如果需要烧录字幕
+		// 注意：烧录字幕通常需要重编码，因此不能使用 -c copy
+		// 这里的 subtitles=filename 滤镜会自动处理视频流
+		
+		// 修复 Windows 路径问题：FFmpeg 滤镜中路径的 : 和 \ 需要特殊处理
+		// 1. 将反斜杠 \ 替换为正斜杠 /
+		// 2. 将盘符后的冒号 : 转义为 \:
+		
+		sanitizedSub := strings.ReplaceAll(subtitle, "\\", "/")
+		sanitizedSub = strings.ReplaceAll(sanitizedSub, ":", "\\:")
+		
+		// 使用单引号包裹路径以处理可能存在的特殊字符（如空格、括号）
+		// 但注意：exec.Command 参数中的单引号会被原样传给 ffmpeg，ffmpeg 解析器会处理它
+		// 为了保险，我们既然已经转义了关键字符，可以直接传值，或者加引号。
+		// 最稳妥的方式是：转义关键字符 + 单引号包裹
+		
+		// 这里我们采用最稳妥的 FFmpeg 推荐方式：subtitles='filename'
+		// 并确保 filename 里的单引号被转义（虽然 windows 路径里一般没有单引号）
+		sanitizedSub = strings.ReplaceAll(sanitizedSub, "'", "'\\''")
+		
+		args = append(args, "-vf", fmt.Sprintf("subtitles='%s'", sanitizedSub))
 	} else {
-		cmd = exec.Command(ffmpegBin, "-i", inputFile, "-c:v", "libx264", "-c:a", "aac", outputFile)
+		// 如果不烧录字幕，根据输出格式决定是否指定编码器
+		// 为了保持对旧逻辑的兼容性（高质量转换），如果目标是 mp4/mkv，我们默认使用 libx264 + aac
+		ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(outputFile), "."))
+		if ext == "mp4" || ext == "mkv" {
+			args = append(args, "-c:v", "libx264", "-c:a", "aac")
+		} else {
+			// 其他格式让 ffmpeg 自动选择最佳编码器，或者用户可以通过其他方式指定（目前暂未暴露）
+			// 也可以默认尝试 -c:v libx264 如果容器支持
+		}
 	}
+	
+	args = append(args, outputFile)
+	cmd := exec.Command(ffmpegBin, args...)
 	fmt.Printf("%v\n", cmd.Args)
 
 	// 获取命令的标准错误输出管道
@@ -308,35 +336,6 @@ func CheckVideoHasSubtitles(videoPath string) (bool, error) {
 	// 如果没有找到 "Subtitle" 关键字，则认为视频不包含字幕
 	return false, nil
 }
-
-//func moveFile(src, dst string) error {
-//	// 复制文件
-//	in, err := os.Open(src)
-//	if err != nil {
-//		return err
-//	}
-//	defer in.Close()
-//
-//	out, err := os.Create(dst)
-//	if err != nil {
-//		return err
-//	}
-//	defer func() {
-//		out.Close()
-//		os.Remove(dst) // 复制失败时清理
-//	}()
-//
-//	_, err = io.Copy(out, in)
-//	if err != nil {
-//		return err
-//	}
-//
-//	// 关闭文件并删除原文件
-//	if err = out.Close(); err != nil {
-//		return err
-//	}
-//	return os.Remove(src)
-//}
 
 func ReplaceChar(name string) string {
 	if ffmpegSpecialChars.MatchString(name) {
