@@ -18,8 +18,11 @@ func main() {
 	// 自定义 Usage，避免 pflag 默认输出误导用户以为只能传 flag
 	pflag.Usage = printUsage
 
-	// 解析 flag，注意：pflag 默认遇到非 flag 参数就会停止解析（如果 Interspersed 为 false），
-	// 或者解析所有 flag（默认为 true）。我们希望解析全局 flag，剩下的作为子命令。
+	// 禁止交叉解析：遇到第一个非 flag 参数（即子命令）后停止解析
+	// 这样子命令的参数（如 --dry-run）就不会被 main 的 parser 误读或报错
+	pflag.CommandLine.SetInterspersed(false)
+
+	// 解析 flag
 	pflag.Parse()
 
 	// 处理 ffmpeg 路径设置

@@ -1,101 +1,150 @@
 package commands
 
 import (
+	"context"
 	"ffmpeg/util"
 	"fmt"
 	"github.com/spf13/pflag"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 )
+
+type ConvertJob struct {
+	Path         string
+	TargetFormat string
+	DryRun       bool
+	Accel        string
+	Force        bool
+}
 
 func RunConvert(args []string) {
 	fs := pflag.NewFlagSet("convert", pflag.ExitOnError)
-	dirs := fs.StringSliceP("dirs", "d", []string{}, "Directories or files to process (comma separated or multiple flags)")
-	targetFormat := fs.String("to", "mp4", "Target format (e.g. mp4, mkv, avi)")
+	dirs := fs.StringSliceP("dirs", "d", []string{}, "Directories or files to process")
+	targetFormat := fs.String("to", "mp4", "Target format")
+	dryRun := fs.Bool("dry-run", false, "Simulate operation")
+	workers := fs.Int("workers", 1, "Number of concurrent workers")
+	accel := fs.String("accel", "", "Hardware acceleration (cuda, qsv, amf)")
+	force := fs.Bool("force", false, "Force conversion even if format matches")
 	
 	fs.Parse(args)
 
-	// 合并 flag 指定的目录和位置参数指定的目录
 	targetPaths := *dirs
 	targetPaths = append(targetPaths, fs.Args()...)
 
 	if len(targetPaths) == 0 {
-		fmt.Println("Error: No paths specified. Usage: convert [paths...] or convert -d [paths...]")
+		fmt.Println("Error: No paths specified.")
 		fs.Usage()
 		return
 	}
 
-	// 确保 targetFormat 不带点
 	*targetFormat = strings.TrimPrefix(*targetFormat, ".")
 
-	fmt.Printf("Processing paths: %v, Target Format: %s\n", targetPaths, *targetFormat)
+	// 1. 设置信号监听 (优雅退出)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	for _, path := range targetPaths {
-		info, err := os.Stat(path)
-		if err != nil {
-			fmt.Printf("Error accessing %s: %v\n", path, err)
-			continue
-		}
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		fmt.Println("\n🛑 接到停止信号，正在取消所有任务并清理...")
+		cancel()
+	}()
 
-		if info.IsDir() {
-			if err := parseDirsVidInfo(path, *targetFormat); err != nil {
-				fmt.Printf("Error processing directory %s: %v\n", path, err)
-			}
-		} else {
-			// Process single file
-			if isVideoFile(path) {
-				if err := processVideoFile(path, *targetFormat); err != nil {
-					fmt.Printf("Error converting file %s: %v\n", path, err)
+	// 2. 初始化 Worker Pool
+	jobChan := make(chan ConvertJob, len(targetPaths)*100) // 缓冲稍大一点
+	var wg sync.WaitGroup
+
+	// 限制 worker 数量，至少为 1
+	numWorkers := *workers
+	if numWorkers < 1 {
+		numWorkers = 1
+	}
+	
+	fmt.Printf("🚀 启动 %d 个并发 Worker (加速模式: %s)\n", numWorkers, *accel)
+	if *dryRun {
+		fmt.Println("🚧 DRY-RUN 模式: 不会修改任何文件")
+	}
+
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			for job := range jobChan {
+				// 检查是否已取消
+				select {
+				case <-ctx.Done():
+					return
+				default:
 				}
-			} else {
-				fmt.Printf("Skipping non-video file: %s\n", path)
+
+				// 执行任务
+				if err := processVideoJob(ctx, job); err != nil {
+					// 如果是取消导致的错误，不打印常规错误日志
+					if ctx.Err() == nil {
+						fmt.Printf("[Worker %d] ❌ 处理失败 %s: %v\n", workerID, job.Path, err)
+					}
+				}
 			}
-		}
-	}
-}
-
-// Defined to avoid re-parsing flags inside recursive calls if we were passing args, 
-// but here we just pass the path string.
-var excludedDirs = map[string]bool{}
-var num int
-
-func parseDirsVidInfo(dir string, targetFormat string) error {
-	dirEntries, err := os.ReadDir(dir)
-	if err != nil {
-		return fmt.Errorf("read dir %s failed: %w", dir, err)
+		}(i)
 	}
 
-	for _, dirEntry := range dirEntries {
-		entryName := dirEntry.Name()
-		entryPath := filepath.Join(dir, entryName)
-		
-		absEntryPath, err := filepath.Abs(entryPath)
-		if err != nil {
-			return fmt.Errorf("get abs path failed %s: %w", entryPath, err)
-		}
-
-		if dirEntry.IsDir() {
-			if excludedDirs[absEntryPath] {
+	// 3. 收集并发送任务
+	go func() {
+		for _, path := range targetPaths {
+			// 检查 ctx
+			if ctx.Err() != nil {
+				break
+			}
+			
+			info, err := os.Stat(path)
+			if err != nil {
+				fmt.Printf("Error accessing %s: %v\n", path, err)
 				continue
 			}
-			if err := parseDirsVidInfo(entryPath, targetFormat); err != nil {
-				return fmt.Errorf("process subdir %s failed: %w", entryPath, err)
-			}
-			continue
-		} else {
-			if isVideoFile(entryPath) {
-				if err := processVideoFile(entryPath, targetFormat); err != nil {
-					// Don't stop the whole directory process for one failed file, but log it.
-					// Or do we return error? Original logic returned error.
-					// Let's log and continue? Or return error.
-					// Original: return err
-					return err
+
+			if info.IsDir() {
+				walkDir(ctx, path, *targetFormat, *dryRun, *accel, *force, jobChan)
+			} else {
+				if isVideoFile(path) {
+					jobChan <- ConvertJob{Path: path, TargetFormat: *targetFormat, DryRun: *dryRun, Accel: *accel, Force: *force}
 				}
 			}
 		}
+		close(jobChan)
+	}()
+
+	// 4. 等待所有任务完成
+	wg.Wait()
+	fmt.Println("✅ 所有任务已完成 (或已停止)")
+}
+
+func walkDir(ctx context.Context, dir, targetFormat string, dryRun bool, accel string, force bool, jobChan chan<- ConvertJob) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		fmt.Printf("Read dir failed %s: %v\n", dir, err)
+		return
 	}
-	return nil
+
+	for _, entry := range entries {
+		if ctx.Err() != nil {
+			return
+		}
+		
+		fullPath := filepath.Join(dir, entry.Name())
+		
+		if entry.IsDir() {
+			walkDir(ctx, fullPath, targetFormat, dryRun, accel, force, jobChan)
+		} else {
+			if isVideoFile(fullPath) {
+				jobChan <- ConvertJob{Path: fullPath, TargetFormat: targetFormat, DryRun: dryRun, Accel: accel, Force: force}
+			}
+		}
+	}
 }
 
 func isVideoFile(path string) bool {
@@ -103,99 +152,89 @@ func isVideoFile(path string) bool {
 	return util.VideoExtRegex.MatchString(ext) || ext == ".mp4"
 }
 
-func processVideoFile(inputFile, targetFormat string) error {
+func processVideoJob(ctx context.Context, job ConvertJob) error {
+	inputFile := job.Path
+	targetFormat := job.TargetFormat
+	dryRun := job.DryRun
+	accel := job.Accel
+	force := job.Force
+
 	ext := strings.ToLower(filepath.Ext(inputFile))
 	targetExt := "." + strings.ToLower(targetFormat)
 
-	// --- 自动查找字幕 ---
+	// 字幕查找逻辑
 	var subtitlePath string
 	baseName := strings.TrimSuffix(inputFile, filepath.Ext(inputFile))
 	dir := filepath.Dir(inputFile)
 
-	// 1. 优先尝试同名匹配 (Exact Match)
+	// 1. 同名
 	for _, subExt := range []string{".srt", ".ass", ".str"} {
-		potentialSubPath := filepath.Join(dir, filepath.Base(baseName)+subExt)
-		if _, err := os.Stat(potentialSubPath); err == nil {
-			subtitlePath = potentialSubPath
-			fmt.Printf("找到同名字幕文件: %s\n", subtitlePath)
+		potential := filepath.Join(dir, filepath.Base(baseName)+subExt)
+		if _, err := os.Stat(potential); err == nil {
+			subtitlePath = potential
 			break
 		}
 	}
-
-	// 2. 如果没找到同名，扫描目录下其他字幕 (Loose Match)
+	// 2. 目录下唯一
 	if subtitlePath == "" {
-		entries, _ := os.ReadDir(dir)
-		var subFiles []string
-		for _, e := range entries {
-			if e.IsDir() {
-				continue
-			}
-			lowerName := strings.ToLower(e.Name())
-			if strings.HasSuffix(lowerName, ".srt") || strings.HasSuffix(lowerName, ".ass") || strings.HasSuffix(lowerName, ".str") {
-				subFiles = append(subFiles, filepath.Join(dir, e.Name()))
-			}
-		}
-
-		if len(subFiles) == 1 {
-			subtitlePath = subFiles[0]
-			fmt.Printf("找到目录下唯一字幕文件: %s\n", subtitlePath)
-		} else if len(subFiles) > 1 {
-			vidNameLower := strings.ToLower(filepath.Base(baseName))
-			for _, sub := range subFiles {
-				subNameLower := strings.ToLower(filepath.Base(sub))
-				if strings.Contains(subNameLower, vidNameLower) || strings.Contains(vidNameLower, strings.TrimSuffix(filepath.Base(subNameLower), filepath.Ext(subNameLower))) {
-					subtitlePath = sub
-					fmt.Printf("通过模糊匹配找到字幕文件: %s\n", subtitlePath)
-					break
+		if entries, err := os.ReadDir(dir); err == nil {
+			var subFiles []string
+			for _, e := range entries {
+				if !e.IsDir() {
+					name := strings.ToLower(e.Name())
+					if strings.HasSuffix(name, ".srt") || strings.HasSuffix(name, ".ass") {
+						subFiles = append(subFiles, filepath.Join(dir, e.Name()))
+					}
 				}
+			}
+			if len(subFiles) == 1 {
+				subtitlePath = subFiles[0]
 			}
 		}
 	}
-	// --- 字幕查找结束 ---
 
 	hasSubtitle := subtitlePath != ""
+	
+	// 如果不强制，且已经是目标格式，且没有发现字幕文件，则跳过
+	if !force && ext == targetExt && !hasSubtitle {
+		return nil // 跳过
+	}
 
-	// 如果已经是目标格式，且没有发现字幕文件，则跳过
-	if ext == targetExt && !hasSubtitle {
+	// Temp file
+	tempOutput := filepath.Join(dir, "."+strings.TrimSuffix(filepath.Base(inputFile), filepath.Ext(inputFile))+".tmp"+targetExt)
+	
+	// 确保 temp 被清理
+	defer func() {
+		if ctx.Err() != nil {
+			os.Remove(tempOutput)
+		}
+	}()
+
+	if err := util.ConvertVideo(ctx, inputFile, tempOutput, subtitlePath, hasSubtitle, dryRun, accel); err != nil {
+		return err
+	}
+
+	if dryRun {
 		return nil
 	}
 
-	fmt.Printf("准备处理视频: %s (目标格式: %s, 嵌入字幕: %v)\n", inputFile, targetFormat, hasSubtitle)
-	num++
-	
-	// Temp output file
-	tempOutput := filepath.Join(dir, "."+strings.TrimSuffix(filepath.Base(inputFile), filepath.Ext(inputFile))+".tmp"+targetExt)
-	
-	// Convert or Embed
-	if err := util.ConvertVideo(inputFile, tempOutput, subtitlePath, hasSubtitle); err != nil {
-		return fmt.Errorf("处理失败: %w", err)
-	}
-	
-	// Success
-	// 如果原文件和目标文件后缀相同（如都是 .mp4），重命名时会覆盖原文件。
-	// 但我们之前已经用 .tmp 作为中间名，所以安全。
+	// Rename
 	finalTargetFile := filepath.Join(dir, filepath.Base(baseName)+targetExt)
 	
-	// 如果目标路径和输入路径一致（例如都是 .mp4），先删除原文件或者直接重命名覆盖
-	// 在 Windows 上，Rename 无法直接覆盖已存在的文件，所以我们需要先处理。
 	if strings.ToLower(finalTargetFile) == strings.ToLower(inputFile) {
-		fmt.Printf("覆盖原文件: %s\n", inputFile)
 		os.Remove(inputFile)
 	} else {
-		fmt.Printf("删除原始文件: %s\n", inputFile)
 		os.Remove(inputFile)
 	}
 	
-	if err := os.Rename(tempOutput, finalTargetFile); err != nil {
-		return fmt.Errorf("重命名临时文件 %s 失败: %w", tempOutput, err)
+	if err := util.SafeRename(tempOutput, finalTargetFile); err != nil {
+		return fmt.Errorf("rename failed: %w", err)
 	}
-	
-	// Remove subtitle file as well if it was embedded
+
 	if hasSubtitle {
-		fmt.Printf("删除已嵌入的字幕文件: %s\n", subtitlePath)
 		os.Remove(subtitlePath)
 	}
 	
-	fmt.Printf("处理成功: %s\n", finalTargetFile)
+	fmt.Printf("✅ 完成: %s\n", filepath.Base(finalTargetFile))
 	return nil
 }
