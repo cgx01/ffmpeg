@@ -138,63 +138,48 @@ func GetVideoCodec(inputFile string) (string, error) {
 }
 
 // ConvertVideo 函数用于通用的视频格式转换
-// ctx: 用于优雅退出的上下文
-// dryRun: 预演模式
-// accel: 硬件加速模式 ("cuda", "qsv", "")
-func ConvertVideo(ctx context.Context, inputFile, outputFile, subtitle string, isSub, dryRun bool, accel string) error {
+func ConvertVideo(ctx context.Context, inputFile, outputFile, subtitle string, isSub, dryRun bool, accel string, vcodec string) error {
 	var args []string
-	
-	// 硬件加速解码建议放在 -i 之前 (虽然 ffmpeg 有时会自动处理，但显式指定更稳)
-	// 但对于兼容性，通常只指定编码器即可。解码加速有时会有坑。
-	// 这里我们主要关注编码加速。
-
 	args = append(args, "-i", inputFile)
 
-	// --- 字幕处理 ---
+	// 获取源视频编码
+	srcCodec, err := GetVideoCodec(inputFile)
+	if err != nil {
+		fmt.Printf("警告: 无法探测编码 (%v)，将进行重编码\n", err)
+		srcCodec = ""
+	}
+
+	// 1. 字幕烧录逻辑 (必须重编码)
 	if isSub && subtitle != "" {
-		// 1. 自动修复字幕编码 (GBK -> UTF-8)
-		// 为了防止 ffmpeg 烧录乱码，我们先检查并转换字幕
-		// 这里的 subtitle 可能是原始路径，我们需要生成一个 utf8 的临时副本
 		utf8SubPath, err := ensureUtf8Subtitle(subtitle)
 		if err != nil {
-			fmt.Printf("⚠️ 字幕编码转换失败，尝试使用原文件: %v\n", err)
 			utf8SubPath = subtitle
 		} else if utf8SubPath != subtitle {
-			// 如果生成了临时字幕文件，函数结束时需要清理
 			defer os.Remove(utf8SubPath)
-			if dryRun {
-				fmt.Printf("[Dry-Run] Would convert subtitle to UTF-8: %s\n", utf8SubPath)
-			}
 		}
 
-		// 2. 构建字幕滤镜
 		sanitizedSub := strings.ReplaceAll(utf8SubPath, "\\", "/")
 		sanitizedSub = strings.ReplaceAll(sanitizedSub, ":", "\\:")
 		sanitizedSub = strings.ReplaceAll(sanitizedSub, "'", "'\\''")
 		args = append(args, "-vf", fmt.Sprintf("subtitles='%s'", sanitizedSub))
 		
-		// 烧录字幕必须重编码
-		args = append(args, buildCodecArgs("libx264", accel)...)
+		// 使用指定的编码器
+		args = append(args, buildCodecArgs(vcodec, accel)...)
 	} else {
-		// --- 无字幕，智能判断 ---
-		codec, err := GetVideoCodec(inputFile)
-		if err != nil {
-			fmt.Printf("警告: 无法探测编码 (%v)，将默认进行重编码\n", err)
-			codec = ""
-		}
-
+		// 2. 智能判断
 		targetExt := strings.ToLower(strings.TrimPrefix(filepath.Ext(outputFile), "."))
-		// H.264/HEVC -> MP4/MKV 可以流复制
-		shouldCopyVideo := (targetExt == "mp4" || targetExt == "mkv") && (codec == "h264" || codec == "hevc")
+		
+		// 只有目标编码与源编码一致，且容器兼容时，才进行流复制
+		// 比如：用户要求 h264，源也是 h264，则 copy
+		// 比如：用户要求 h264，源是 hevc，则必须转码
+		shouldCopyVideo := (targetExt == "mp4" || targetExt == "mkv") && (srcCodec == strings.ToLower(vcodec))
 
 		if shouldCopyVideo {
-			fmt.Printf("⚡ 触发智能流复制 (源编码: %s) -> -c:v copy\n", codec)
-			args = append(args, "-c:v", "copy", "-c:a", "aac") // 音频依然转 AAC 保底，或者也可以 copy
+			fmt.Printf("⚡ 触发智能流复制 (源编码 %s 符合目标要求) -> -c:v copy\n", srcCodec)
+			args = append(args, "-c:v", "copy", "-c:a", "aac")
 		} else {
 			// 重编码
-			if targetExt == "mp4" || targetExt == "mkv" {
-				args = append(args, buildCodecArgs("libx264", accel)...)
-			}
+			args = append(args, buildCodecArgs(vcodec, accel)...)
 		}
 	}
 	
@@ -206,54 +191,44 @@ func ConvertVideo(ctx context.Context, inputFile, outputFile, subtitle string, i
 	}
 
 	cmd := exec.CommandContext(ctx, ffmpegBin, args...)
-	
-	// 获取 stderr
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return err
-	}
-
+	stderr, _ := cmd.StderrPipe()
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-
-	// 进度条
 	go printProgress(stderr, inputFile)
-
-	// 等待
 	if err := cmd.Wait(); err != nil {
-		// 如果是上下文取消（用户按 Ctrl+C），返回特定错误
 		if ctx.Err() != nil {
-			return ctx.Err() // "context canceled"
+			return ctx.Err()
 		}
 		return err
 	}
-	
 	fmt.Println(generateProgressBar(100.0, barWidth))
 	return nil
 }
 
-// buildCodecArgs 根据加速模式返回编码参数
-// defaultCodec: 软编码时的默认编码器 (如 libx264)
-func buildCodecArgs(defaultCodec, accel string) []string {
-	switch strings.ToLower(accel) {
-	case "cuda", "nvenc":
-		// N 卡加速
-		// h264_nvenc 预设参数，p4 是中等预设，p7 是最慢最高画质
-		// -cq 可以控制质量
-		fmt.Println("🚀 使用 NVIDIA 硬件加速 (h264_nvenc)")
-		return []string{"-c:v", "h264_nvenc", "-preset", "p4", "-c:a", "aac"}
-	case "qsv":
-		// Intel 核显
-		fmt.Println("🚀 使用 Intel QSV 硬件加速 (h264_qsv)")
-		return []string{"-c:v", "h264_qsv", "-global_quality", "20", "-c:a", "aac"}
-	case "amf":
-		// AMD
-		fmt.Println("🚀 使用 AMD AMF 硬件加速 (h264_amf)")
-		return []string{"-c:v", "h264_amf", "-c:a", "aac"}
+// buildCodecArgs 根据加速模式和目标编码返回参数
+func buildCodecArgs(vcodec, accel string) []string {
+	vcodec = strings.ToLower(vcodec)
+	isNVENC := strings.ToLower(accel) == "cuda" || strings.ToLower(accel) == "nvenc"
+	
+	switch vcodec {
+	case "h264", "x264":
+		if isNVENC {
+			fmt.Println("🚀 使用 NVIDIA 加速: h264_nvenc")
+			return []string{"-c:v", "h264_nvenc", "-preset", "p4", "-c:a", "aac"}
+		}
+		fmt.Println("🐌 使用 CPU 编码: libx264")
+		return []string{"-c:v", "libx264", "-c:a", "aac"}
+	case "hevc", "x265", "h265":
+		if isNVENC {
+			fmt.Println("🚀 使用 NVIDIA 加速: hevc_nvenc")
+			return []string{"-c:v", "hevc_nvenc", "-preset", "p4", "-c:a", "aac"}
+		}
+		fmt.Println("🐌 使用 CPU 编码: libx265")
+		return []string{"-c:v", "libx265", "-c:a", "aac"}
 	default:
-		// 软编码
-		return []string{"-c:v", defaultCodec, "-c:a", "aac"}
+		// 默认回退
+		return []string{"-c:v", "libx264", "-c:a", "aac"}
 	}
 }
 
