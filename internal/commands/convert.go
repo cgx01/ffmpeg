@@ -173,6 +173,7 @@ func processVideoJob(ctx context.Context, job ConvertJob) error {
 	
 	// 如果不强制，且已经是目标格式，且没有发现字幕文件，则跳过
 	if !force && ext == targetExt && !hasSubtitle {
+		fmt.Printf("⏭️  跳过: %s (已是目标格式且无字幕，使用 --force 强制)\n", filepath.Base(inputFile))
 		return nil 
 	}
 
