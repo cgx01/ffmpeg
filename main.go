@@ -1,7 +1,7 @@
 package main
 
 import (
-	"ffmpeg/internal/commands"
+	"ffmpeg-tool/internal/commands"
 	"fmt"
 	"github.com/spf13/pflag"
 	"log"

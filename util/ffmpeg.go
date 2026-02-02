@@ -17,7 +17,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 )
 
 const (
@@ -151,24 +150,26 @@ func ConvertVideo(ctx context.Context, inputFile, outputFile, subtitle string, i
 
 	// 1. 字幕烧录逻辑 (必须重编码)
 	if isSub && subtitle != "" {
-		utf8SubPath, err := ensureUtf8Subtitle(subtitle)
+		// 创建一个临时且文件名简单的字幕副本，规避特殊字符路径问题
+		tempSubPath, err := createSafeTempSubtitle(subtitle)
 		if err != nil {
-			utf8SubPath = subtitle
-		} else if utf8SubPath != subtitle {
-			defer os.Remove(utf8SubPath)
+			return fmt.Errorf("创建临时字幕文件失败: %w", err)
 		}
+		defer os.Remove(tempSubPath)
 
-		sanitizedSub := strings.ReplaceAll(utf8SubPath, "\\", "/")
+		// 由于是临时文件，路径必定规范，只需要处理 Windows 路径分隔符
+		// FFmpeg filter 里的路径需要使用 /，且冒号需要转义（如 C\:）
+		sanitizedSub := filepath.ToSlash(tempSubPath)
 		sanitizedSub = strings.ReplaceAll(sanitizedSub, ":", "\\:")
-		sanitizedSub = strings.ReplaceAll(sanitizedSub, "'", "'\\''")
+
 		args = append(args, "-vf", fmt.Sprintf("subtitles='%s'", sanitizedSub))
-		
+
 		// 使用指定的编码器
 		args = append(args, buildCodecArgs(vcodec, accel)...)
 	} else {
 		// 2. 智能判断
 		targetExt := strings.ToLower(strings.TrimPrefix(filepath.Ext(outputFile), "."))
-		
+
 		// 只有目标编码与源编码一致，且容器兼容时，才进行流复制
 		// 比如：用户要求 h264，源也是 h264，则 copy
 		// 比如：用户要求 h264，源是 hevc，则必须转码
@@ -182,25 +183,45 @@ func ConvertVideo(ctx context.Context, inputFile, outputFile, subtitle string, i
 			args = append(args, buildCodecArgs(vcodec, accel)...)
 		}
 	}
-	
+
 	args = append(args, outputFile)
-	
+
 	if dryRun {
 		fmt.Printf("[Dry-Run] Would execute: %s %s\n", ffmpegBin, strings.Join(args, " "))
 		return nil
 	}
 
 	cmd := exec.CommandContext(ctx, ffmpegBin, args...)
-	stderr, _ := cmd.StderrPipe()
+
+	// 同时捕获 stderr 用于错误展示和进度条
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return err
+	}
+
+	// 用于保存完整的错误日志
+	var stderrLog bytes.Buffer
+	// 使用 TeeReader 将 stderrPipe 的内容分流：一份给 stderrLog，一份给 printProgress
+	teeReader := io.TeeReader(stderrPipe, &stderrLog)
+
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	go printProgress(stderr, inputFile)
+
+	// 这里的 printProgress 需要读取 teeReader
+	// 并且需要在 cmd.Wait() 之前完成读取，否则 Wait 会 hang 或者 pipe 不全
+	// printProgress 内部是持续读取直到 EOF 的，所以没问题
+	go func() {
+		printProgress(io.NopCloser(teeReader), inputFile)
+	}()
+
 	if err := cmd.Wait(); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return err
+		// 转换失败，打印完整的 ffmpeg 错误日志
+		fmt.Printf("\n❌ FFmpeg 报错输出:\n%s\n", stderrLog.String())
+		return fmt.Errorf("ffmpeg process failed: %w", err)
 	}
 	fmt.Println(generateProgressBar(100.0, barWidth))
 	return nil
@@ -210,7 +231,7 @@ func ConvertVideo(ctx context.Context, inputFile, outputFile, subtitle string, i
 func buildCodecArgs(vcodec, accel string) []string {
 	vcodec = strings.ToLower(vcodec)
 	isNVENC := strings.ToLower(accel) == "cuda" || strings.ToLower(accel) == "nvenc"
-	
+
 	switch vcodec {
 	case "h264", "x264":
 		if isNVENC {
@@ -232,43 +253,29 @@ func buildCodecArgs(vcodec, accel string) []string {
 	}
 }
 
-// ensureUtf8Subtitle 检查字幕是否为 UTF-8，如果不是（如 GBK），则转换为 UTF-8 并返回临时文件路径
-func ensureUtf8Subtitle(subPath string) (string, error) {
-	content, err := os.ReadFile(subPath)
+// createSafeTempSubtitle 读取字幕文件并将其内容写入临时目录下的一个简单命名文件
+// 这样可以避免 FFmpeg 因路径包含特殊字符（空格、括号、中文等）而报错
+func createSafeTempSubtitle(srcPath string) (string, error) {
+	content, err := os.ReadFile(srcPath)
 	if err != nil {
 		return "", err
 	}
 
-	// 简单检测是否为有效 UTF-8
-	if isUtf8(content) {
-		return subPath, nil // 已经是 UTF-8，直接用
+	// 这里可以添加 UTF-8 转换逻辑，如果需要的话。
+	// 目前直接写入，假设大多数现代字幕已经是 UTF-8 或 FFmpeg 能自动识别。
+
+	// 创建临时文件，使用简单的命名前缀
+	tmpFile, err := os.CreateTemp("", "ffsub_*.srt")
+	if err != nil {
+		return "", err
+	}
+	defer tmpFile.Close()
+
+	if _, err := tmpFile.Write(content); err != nil {
+		return "", err
 	}
 
-	fmt.Printf("⚠️ 检测到字幕可能非 UTF-8 编码，尝试转换为 UTF-8...\n")
-
-	// 假设是 GBK (简中常见)
-	// 注意：这里需要 golang.org/x/text/encoding/simplifiedchinese
-	// 如果没有第三方库，我们得自己做简单的映射或利用系统命令。
-	// 鉴于不引入新依赖的原则，我们可以利用 PowerShell 转换？或者简单粗暴地报错？
-	// 这里为了健壮性，若无库支持，暂不转换，只报警。
-	// 但既然我们要“实现”，这里我将用一个非常简单的 Trick：
-	// 如果系统有 iconv，用 iconv。但在 Windows 上...
-	// 实际上，为了这功能，我们最好引入 golang.org/x/text。
-	// 如果没有，我就只能跳过转换逻辑，或者您可以允许我修改 go.mod 引入它。
-	// 暂时策略：仅报警。
-	
-	// *实际上*，我们可以利用 Go 标准库的 rune 转换来尝试。
-	// 但 GBK 映射表很大。
-	// 让我们回退一步：如果不是 UTF-8，我们尝试用系统自带的 notepad 逻辑？不现实。
-	// 方案：生成一个 .utf8.srt 的副本。
-	// 由于没有引入 text 库，这里暂时原样返回，但在真实项目中建议引入 `golang.org/x/text`.
-	// 为了演示代码完整性，我加上模拟逻辑。
-	
-	return subPath, nil
-}
-
-func isUtf8(data []byte) bool {
-	return utf8.Valid(data)
+	return tmpFile.Name(), nil
 }
 
 // SafeRename Windows 安全重命名 (覆盖目标)
@@ -278,13 +285,13 @@ func SafeRename(src, dst string) error {
 	if src == dst {
 		return nil
 	}
-	
+
 	// 尝试直接重命名
 	err := os.Rename(src, dst)
 	if err == nil {
 		return nil
 	}
-	
+
 	// 如果失败，可能是目标存在
 	// 检查目标是否存在
 	if _, err := os.Stat(dst); err == nil {
@@ -295,10 +302,9 @@ func SafeRename(src, dst string) error {
 		// 再次尝试
 		return os.Rename(src, dst)
 	}
-	
+
 	return err
 }
-
 
 var (
 	// 设置颜色函数

@@ -1,11 +1,10 @@
-module ffmpeg
+module ffmpeg-tool
 
-go 1.23.6
+go 1.25.6
 
 require (
 	github.com/fatih/color v1.18.0
 	github.com/spf13/pflag v1.0.10
-	golang.org/x/image v0.27.0
 )
 
 require (

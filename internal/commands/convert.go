@@ -2,7 +2,7 @@ package commands
 
 import (
 	"context"
-	"ffmpeg/util"
+	"ffmpeg-tool/util"
 	"fmt"
 	"github.com/spf13/pflag"
 	"os"
